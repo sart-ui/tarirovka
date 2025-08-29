@@ -1,969 +1,560 @@
-*** Begin Patch
-*** Add File: an2_calib_qt.pro
-+TEMPLATE = app
-+TARGET = an2_calib
-+
-+CONFIG += qt c++17 warn_on
-+QT += core gui widgets charts
-+
-+INCLUDEPATH += include
-+
-+SOURCES += \
-+    src/main.cpp \
-+    src/CalibrationCore.cpp \
-+    src/GostProviders.cpp \
-+    src/ChartHelpers.cpp \
-+    src/TestingWindow.cpp
-+
-+HEADERS += \
-+    include/CalibrationCore.hpp \
-+    include/GostProviders.hpp \
-+    include/ChartHelpers.hpp \
-+    include/TestingWindow.hpp
-+
-+QMAKE_CXXFLAGS += -Wall -Wextra
-+
-+# На некоторых Windows-сборках qmake не подтягивает QtCharts автоматически — подстрахуемся
-+win32 {
-+    CONFIG(release, debug|release): LIBS += -L$$[QT_INSTALL_LIBS] -lQt6Charts
-+    CONFIG(debug, debug|release):   LIBS += -L$$[QT_INSTALL_LIBS] -lQt6Chartsd
-+}
-+
-*** End Patch
-*** Begin Patch
-*** Add File: include/CalibrationCore.hpp
-+#pragma once
-+#include <vector>
-+#include <deque>
-+#include <string>
-+#include <functional>
-+#include <optional>
-+#include <cstdint>
+*** a/include/CalibrationCore.hpp
+--- b/include/CalibrationCore.hpp
+@@
+ #pragma once
+ #include <vector>
+ #include <deque>
+ #include <string>
+ #include <functional>
 +#include <memory>
-+
-+namespace an2 {
-+
-+enum class SensorType {
-+    P1_RTD,
-+    TC_L,
-+    P1B_PRESS,
-+    PM15B_PRESS,
-+    NO_GOST
-+};
-+
-+struct FieldPoint {
-+    int index{};
-+    double ref{};
-+    double piv_live{};
-+    bool valid{false};
-+    double manual{};
-+};
-+
-+struct StabilizationParams {
-+    double delta = 0.5;      // абсолютная дельта ПИВ (ед. ПИВ)
-+    double windowSec = 5.0;  // длительность окна, сек (валидные 5с по умолчанию)
-+};
-+
-+struct StabilizationState {
-+    bool stable = false;
-+    double mean = 0.0;
-+    double min = 0.0;
-+    double max = 0.0;
-+    double duration = 0.0; // текущая длительность окна (сек)
-+};
-+
-+class PivStabilizer {
-+public:
-+    explicit PivStabilizer(const StabilizationParams& p);
-+    void reset();
-+    StabilizationState pushSample(double piv, std::int64_t now_ms);
-+    void setParams(const StabilizationParams& p) { params_ = p; }
-+    const StabilizationParams& params() const { return params_; }
-+private:
-+    StabilizationParams params_;
-+    std::deque<std::pair<std::int64_t,double>> buf_;
-+    bool haveLast_{false};
-+    double last_{0.0};
-+};
-+
-+class BaseCurveProvider {
-+public:
-+    virtual ~BaseCurveProvider() = default;
-+    virtual double eval(double x) const = 0;                 // y=f0(x), x — ПИВ, y — референс
-+    virtual std::pair<double,double> xRange() const = 0;     // диапазон по X
-+    virtual std::string name() const = 0;
-+};
-+
-+class NullCurveProvider : public BaseCurveProvider {
-+public:
-+    double eval(double) const override { return 0.0; }
-+    std::pair<double,double> xRange() const override { return {0.0, 1.0}; }
-+    std::string name() const override { return "No GOST (Zero Base)"; }
-+};
-+
-+class LookupTableProvider : public BaseCurveProvider {
-+public:
-+    explicit LookupTableProvider(std::vector<std::pair<double,double>> points);
-+    double eval(double x) const override;
-+    std::pair<double,double> xRange() const override;
-+    std::string name() const override { return name_; }
-+    void setName(std::string n) { name_ = std::move(n); }
-+private:
-+    std::vector<std::pair<double,double>> pts_;
-+    std::string name_ = "LookupTable";
-+};
-+
-+class PolyProvider : public BaseCurveProvider {
-+public:
-+    explicit PolyProvider(std::vector<double> coeffs, std::pair<double,double> xr, std::string name);
-+    double eval(double x) const override;
-+    std::pair<double,double> xRange() const override { return xr_; }
-+    std::string name() const override { return name_; }
-+private:
-+    std::vector<double> c_;
-+    std::pair<double,double> xr_;
-+    std::string name_;
-+};
-+
-+struct ChebBasis {
-+    int degree = 3;
-+    double xmin = 0.0;
-+    double xmax = 1.0;
-+    std::vector<double> features(double x) const;
-+};
-+
-+struct FitReport {
-+    bool ok = false;
-+    std::vector<double> coeffs;
-+    double rmse = 0.0;
-+    double maxAbsResid = 0.0;
-+    int n = 0;
-+};
-+
-+class Calibrator {
-+public:
-+    Calibrator();
-+
-+    void setSensorType(SensorType t) { type_ = t; }
-+    SensorType sensorType() const { return type_; }
-+
-+    void setBaseCurve(std::shared_ptr<BaseCurveProvider> base) { base_ = std::move(base); }
-+    const BaseCurveProvider* baseCurve() const { return base_.get(); }
-+
-+    void setChebBasis(const ChebBasis& b) { basis_ = b; }
-+    const ChebBasis& chebBasis() const { return basis_; }
-+
-+    void setRidgeLambda(double l) { lambda_ = l; }
-+
-+    void clearPoints();
-+    void addPoint(double ref, double piv, bool valid, double manual);
-+    const std::vector<FieldPoint>& points() const { return pts_; }
-+    std::vector<FieldPoint>& points() { return pts_; }
-+
-+    FitReport fit();
-+    double evaluate(double x) const;
-+    void applyZeroTrim(double refAtZero, double pivAtZero);
-+    const std::optional<FitReport>& lastReport() const { return lastReport_; }
-+
-+private:
-+    SensorType type_{SensorType::NO_GOST};
-+    std::shared_ptr<BaseCurveProvider> base_ = std::make_shared<NullCurveProvider>();
-+    ChebBasis basis_{};
-+    double lambda_ = 1e-6;
-+    std::vector<FieldPoint> pts_;
-+    std::vector<double> chebCoeffs_;
-+    std::optional<FitReport> lastReport_{};
-+};
-+
-+struct CurveSeries {
-+    std::vector<double> x;
-+    std::vector<double> y;
-+};
-+
-+CurveSeries sampleCurve(std::function<double(double)> f, double x0, double x1, int nSamples);
-+
-+} // namespace an2
-+
-*** End Patch
-*** Begin Patch
-*** Add File: include/GostProviders.hpp
-+#pragma once
-+#include "CalibrationCore.hpp"
-+#include <memory>
-+
-+namespace an2 {
-+
-+struct GostFactoryConfig {
-+    std::string p1_rtd_csv;
-+    std::string tc_l_csv;
-+    std::string p1b_csv;
-+    std::string pm15b_csv;
-+};
-+
-+class GostFactory {
-+public:
-+    static std::shared_ptr<BaseCurveProvider> create(SensorType t, const GostFactoryConfig& cfg);
-+    static std::shared_ptr<BaseCurveProvider> fromCsv(const std::string& path, const std::string& name);
-+};
-+
-+} // namespace an2
-+
-*** End Patch
-*** Begin Patch
-*** Add File: include/ChartHelpers.hpp
-+#pragma once
-+#include <QtCharts/QChartView>
-+#include <QtCharts/QChart>
-+#include <QtCharts/QLineSeries>
-+#include <QtCharts/QScatterSeries>
-+#include <QtCharts/QAreaSeries>
-+#include <QtCharts/QValueAxis>
-+#include <QtGui/QColor>
-+#include "CalibrationCore.hpp"
-+
-+namespace an2::charts {
-+
-+// Рисуем:
-+//  - ГОСТ (штрих, синий)
-+//  - Тарированную (оранжевая, жирная)
-+//  - Коридор ±tol% (светло-серый полупрозрачный)
-+//  - Точки: Референс (тёмно-синие), Ручной ввод (тёмно-оранжевые)
-+QChartView* createOrUpdateChart(QChartView* view,
-+                                const BaseCurveProvider* base,
-+                                const Calibrator& calib,
-+                                double tol_percent,
-+                                double x0, double x1,
-+                                const std::vector<FieldPoint>& points);
-+
-+} // namespace an2::charts
-+
-*** End Patch
-*** Begin Patch
-*** Add File: include/TestingWindow.hpp
-+#pragma once
-+#include <QtWidgets/QMainWindow>
-+#include <QtWidgets/QTableWidget>
-+#include <QtWidgets/QPushButton>
-+#include <QtWidgets/QDoubleSpinBox>
-+#include <QtCore/QTimer>
-+#include <QtCore/QElapsedTimer>
-+#include <QtCharts/QChartView>
-+#include "CalibrationCore.hpp"
-+#include "GostProviders.hpp"
-+
-+namespace an2 {
-+
-+class TestingWindow : public QMainWindow {
-+    Q_OBJECT
-+public:
-+    explicit TestingWindow(QWidget* parent=nullptr);
-+
-+private slots:
-+    void onConfirmRef();
-+    void onAddPoint();
-+    void onDeletePoint();
-+    void onClearAll();
-+    void onFit();
-+    void onZeroTrim();
-+    void onTick();
-+
-+private:
-+    void rebuildChart();
-+    void appendTableRow(const FieldPoint& fp);
-+    void updateValidationUI(int row, bool ok, bool timeout, double mean);
-+
-+    // Виджеты
-+    QTableWidget* table_{};
-+    QChartView* chartView_{};
-+    QDoubleSpinBox* refSpin_{};
-+    QDoubleSpinBox* deltaPctSpin_{};   // Δ, % от текущего значения
-+    QDoubleSpinBox* validSecSpin_{};   // время валидности (по умолчанию 5с)
-+    QDoubleSpinBox* timeoutSecSpin_{}; // общий таймаут (по умолчанию 10с)
-+    QDoubleSpinBox* tolSpin_{};        // допуск %, для коридора
-+    QPushButton* btnConfirmRef_{};
-+    QPushButton* btnAddPoint_{};
-+    QPushButton* btnDelete_{};
-+    QPushButton* btnClear_{};
-+    QPushButton* btnFit_{};
-+    QPushButton* btnZeroTrim_{};
-+
-+    // Модель
-+    SensorType type_ = SensorType::NO_GOST;
-+    GostFactoryConfig cfg_{};
-+    std::shared_ptr<BaseCurveProvider> baseCurve_{};
-+    Calibrator calib_{};
-+
-+    // Стабилизация/симуляция
-+    PivStabilizer stab_{{0.1, 5.0}};
-+    QTimer timer_{};
-+    QElapsedTimer elapsed_{};
-+    bool running_ = false;
-+
-+    // Текущее состояние
-+    double currentPiv_ = 0.0;
-+    double targetPiv_ = 0.0;
-+    double pivNoise_ = 0.05;
-+
-+    // Управление авто-режимом
-+    bool awaitingValidation_ = false;
-+    std::int64_t startMs_{0};
-+};
-+
-+} // namespace an2
-+
-*** End Patch
-*** Begin Patch
-*** Add File: src/CalibrationCore.cpp
-+#include "CalibrationCore.hpp"
-+#include <algorithm>
-+#include <cmath>
-+#include <limits>
-+#include <cassert>
-+
-+namespace an2 {
-+
-+// --- PivStabilizer -------------------------------------------------
-+PivStabilizer::PivStabilizer(const StabilizationParams& p) : params_(p) {}
-+
-+void PivStabilizer::reset() {
-+    buf_.clear();
-+    haveLast_ = false;
-+}
-+
-+StabilizationState PivStabilizer::pushSample(double piv, std::int64_t now_ms) {
-+    // Отсев явных одиночных выбросов (4× delta от последнего)
-+    if (haveLast_ && std::abs(piv - last_) > 4.0 * params_.delta) {
-+        // игнорируем этот сэмпл
-+    } else {
-+        buf_.emplace_back(now_ms, piv);
-+        last_ = piv;
-+        haveLast_ = true;
-+    }
-+
-+    // Сдвигаем окно
-+    const std::int64_t window_ms = static_cast<std::int64_t>(params_.windowSec * 1000.0);
-+    while (!buf_.empty() && (now_ms - buf_.front().first) > window_ms) {
-+        buf_.pop_front();
-+    }
-+
-+    StabilizationState st{};
-+    st.duration = buf_.empty() ? 0.0 : (buf_.back().first - buf_.front().first) / 1000.0;
-+    if (buf_.empty()) return st;
-+
-+    double sum = 0.0, mn = std::numeric_limits<double>::infinity(), mx = -mn;
-+    for (auto& p : buf_) { sum += p.second; mn = std::min(mn,p.second); mx = std::max(mx,p.second); }
-+    st.mean = sum / buf_.size();
-+    st.min = mn; st.max = mx;
-+    if (st.duration >= params_.windowSec && (mx - mn) <= (2.0 * params_.delta)) st.stable = true;
-+    return st;
-+}
-+
-+// --- LookupTableProvider -------------------------------------------
-+LookupTableProvider::LookupTableProvider(std::vector<std::pair<double,double>> points)
-+    : pts_(std::move(points)) {
-+    if (pts_.size() < 2) { pts_.push_back({0.0,0.0}); pts_.push_back({1.0,1.0}); }
-+    std::sort(pts_.begin(), pts_.end(), [](auto&a, auto&b){ return a.first < b.first; });
-+}
-+
-+double LookupTableProvider::eval(double x) const {
-+    if (x <= pts_.front().first) return pts_.front().second;
-+    if (x >= pts_.back().first)  return pts_.back().second;
-+    auto it = std::upper_bound(pts_.begin(), pts_.end(), std::make_pair(x, -std::numeric_limits<double>::infinity()),
-+                               [](auto&a, auto&b){ return a.first < b.first; });
-+    size_t i = std::distance(pts_.begin(), it) - 1;
-+    const auto [x0,y0] = pts_[i];
-+    const auto [x1,y1] = pts_[i+1];
-+    double t = (x - x0) / (x1 - x0);
-+    return y0 + t*(y1 - y0);
-+}
-+
-+std::pair<double,double> LookupTableProvider::xRange() const {
-+    return {pts_.front().first, pts_.back().first};
-+}
-+
-+// --- PolyProvider ---------------------------------------------------
-+PolyProvider::PolyProvider(std::vector<double> coeffs, std::pair<double,double> xr, std::string name)
-+    : c_(std::move(coeffs)), xr_(xr), name_(std::move(name)) {}
-+
-+double PolyProvider::eval(double x) const {
-+    double y = 0.0;
-+    for (auto it = c_.rbegin(); it != c_.rend(); ++it) y = y * x + *it;
-+    return y;
-+}
-+
-+// --- ChebBasis ------------------------------------------------------
-+static inline double chebT(int k, double z) {
-+    switch (k) {
-+        case 0: return 1.0;
-+        case 1: return z;
-+        case 2: return 2*z*z - 1.0;
-+        case 3: return 4*z*z*z - 3.0*z;
-+        default: {
-+            double Tkm2 = 1.0, Tkm1 = z, Tk = 0.0;
-+            for (int i=2;i<=k;++i) { Tk = 2*z*Tkm1 - Tkm2; Tkm2 = Tkm1; Tkm1 = Tk; }
-+            return Tkm1;
-+        }
-+    }
-+}
-+
-+std::vector<double> ChebBasis::features(double x) const {
-+    double z = 0.0;
-+    if (xmax > xmin) z = -1.0 + 2.0 * (x - xmin) / (xmax - xmin);
-+    std::vector<double> f; f.reserve(degree+1);
-+    for (int k=0;k<=degree;++k) f.push_back(chebT(k, z));
-+    return f;
-+}
-+
-+// --- WLS+ridge (малые размерности) ---------------------------------
-+static bool solveWlsRidge(const std::vector<std::vector<double>>& X,
-+                          const std::vector<double>& y,
-+                          const std::vector<double>& w,
-+                          double lambda,
-+                          std::vector<double>& out_c) {
-+    const int n = (int)X.size();
-+    if (n == 0) return false;
-+    const int p = (int)X[0].size();
-+    std::vector<double> A(p*p, 0.0), b(p, 0.0);
-+    for (int i=0;i<n;++i) {
-+        const double wi = w.empty()? 1.0 : w[i];
-+        for (int a=0;a<p;++a) {
-+            const double Xa = X[i][a];
-+            b[a] += wi * Xa * y[i];
-+            for (int bcol=0;bcol<p;++bcol) A[a*p + bcol] += wi * Xa * X[i][bcol];
-+        }
-+    }
-+    for (int d=0; d<p; ++d) A[d*p + d] += lambda;
-+    // Гаусс
-+    std::vector<double> M(p*(p+1), 0.0);
-+    for (int r=0;r<p;++r) {
-+        for (int c=0;c<p;++c) M[r*(p+1)+c] = A[r*p + c];
-+        M[r*(p+1)+p] = b[r];
-+    }
-+    for (int k=0;k<p;++k) {
-+        int piv = k; double best = std::abs(M[k*(p+1)+k]);
-+        for (int r=k+1;r<p;++r) { double v = std::abs(M[r*(p+1)+k]); if (v > best) { best = v; piv = r; } }
-+        if (best < 1e-15) return false;
-+        if (piv != k) for (int c=k;c<=p;++c) std::swap(M[k*(p+1)+c], M[piv*(p+1)+c]);
-+        double diag = M[k*(p+1)+k];
-+        for (int c=k;c<=p;++c) M[k*(p+1)+c] /= diag;
-+        for (int r=0;r<p;++r) if (r!=k) {
-+            double factor = M[r*(p+1)+k];
-+            for (int c=k;c<=p;++c) M[r*(p+1)+c] -= factor * M[k*(p+1)+c];
-+        }
-+    }
-+    out_c.assign(p, 0.0);
-+    for (int r=0;r<p;++r) out_c[r] = M[r*(p+1)+p];
+ #include <optional>
+ #include <cstdint>
+ 
+ namespace an2 {
+@@
+     void setSensorType(SensorType t) { type_ = t; }
+     SensorType sensorType() const { return type_; }
+ 
+     void setBaseCurve(std::shared_ptr<BaseCurveProvider> base) { base_ = std::move(base); }
+     const BaseCurveProvider* baseCurve() const { return base_.get(); }
+@@
+     void clearPoints();
+     void addPoint(double ref, double piv, bool valid, double manual);
++    // обновление точки по индексу (0..n-1)
++    bool updatePoint(std::size_t idx, double ref, double piv, bool valid, double manual);
++    // удаление точки по индексу (0..n-1), с переиндексацией FieldPoint::index
++    bool removePointByIndex(std::size_t idx);
+     const std::vector<FieldPoint>& points() const { return pts_; }
+ 
+     // Подгонка коэффициентов Δf по точкам (ref ≈ f(piv))
+     FitReport fit();
+@@
+ private:
+     SensorType type_{SensorType::NO_GOST};
+     std::shared_ptr<BaseCurveProvider> base_ = std::make_shared<NullCurveProvider>();
+     ChebBasis basis_{}; // degree=3, [0,1] по умолчанию
+     double lambda_ = 1e-6; // слабая регуляризация
+ 
+     std::vector<FieldPoint> pts_;
+     std::vector<double> chebCoeffs_; // оценённые Δf коэффициенты
+     std::optional<FitReport> lastReport_{};
+ };
+ 
+*** a/src/CalibrationCore.cpp
+--- b/src/CalibrationCore.cpp
+@@
+ void Calibrator::clearPoints() { pts_.clear(); lastReport_.reset(); }
+ 
+ void Calibrator::addPoint(double ref, double piv, bool valid, double manual) {
+     FieldPoint fp; fp.index = (int)pts_.size()+1; fp.ref = ref; fp.piv_live = piv; fp.valid = valid; fp.manual = manual;
+     pts_.push_back(fp);
+ }
+ 
++bool Calibrator::updatePoint(std::size_t idx, double ref, double piv, bool valid, double manual) {
++    if (idx >= pts_.size()) return false;
++    pts_[idx].ref = ref;
++    pts_[idx].piv_live = piv;
++    pts_[idx].valid = valid;
++    pts_[idx].manual = manual;
 +    return true;
 +}
 +
-+// --- Calibrator -----------------------------------------------------
-+Calibrator::Calibrator() {}
-+
-+void Calibrator::clearPoints() { pts_.clear(); lastReport_.reset(); }
-+
-+void Calibrator::addPoint(double ref, double piv, bool valid, double manual) {
-+    FieldPoint fp; fp.index = (int)pts_.size()+1; fp.ref=ref; fp.piv_live=piv; fp.valid=valid; fp.manual=manual;
-+    pts_.push_back(fp);
++bool Calibrator::removePointByIndex(std::size_t idx) {
++    if (idx >= pts_.size()) return false;
++    pts_.erase(pts_.begin()+static_cast<long>(idx));
++    // переиндексация
++    for (std::size_t i=0;i<pts_.size();++i) pts_[i].index = static_cast<int>(i+1);
++    return true;
 +}
 +
-+FitReport Calibrator::fit() {
-+    FitReport rep{}; rep.n = (int)pts_.size();
-+    if (pts_.size() < 2) { lastReport_ = rep; return rep; }
-+
-+    std::vector<std::vector<double>> X; X.reserve(pts_.size());
-+    std::vector<double> Y; Y.reserve(pts_.size());
-+    std::vector<double> W(pts_.size(), 1.0);
-+
-+    double xmin = std::numeric_limits<double>::infinity();
-+    double xmax = -xmin;
-+    for (auto &p : pts_) { xmin = std::min(xmin, p.piv_live); xmax = std::max(xmax, p.piv_live); }
-+    basis_.xmin = xmin; basis_.xmax = xmax;
-+
-+    for (auto &p : pts_) {
-+        auto f = basis_.features(p.piv_live);
-+        X.push_back(std::move(f));
-+        double y0 = base_->eval(p.piv_live);
-+        Y.push_back(p.ref - y0);
-+        W[X.size()-1] = p.valid ? 1.0 : 0.25;
-+    }
-+
-+    std::vector<double> c;
-+    if (!solveWlsRidge(X, Y, W, lambda_, c)) { lastReport_ = rep; return rep; }
-+    chebCoeffs_ = c;
-+
-+    double se = 0.0, maxabs = 0.0; int n = 0;
-+    for (size_t i=0;i<pts_.size();++i) {
-+        const double x = pts_[i].piv_live;
-+        auto feats = basis_.features(x);
-+        double df = 0.0; for (size_t k=0;k<feats.size();++k) df += chebCoeffs_[k]*feats[k];
-+        double yhat = base_->eval(x) + df;
-+        double r = (yhat - pts_[i].ref);
-+        se += r*r; maxabs = std::max(maxabs, std::abs(r));
-+        ++n;
-+    }
-+    rep.ok = true;
-+    rep.coeffs = chebCoeffs_;
-+    rep.rmse = std::sqrt(se / std::max(1, n));
-+    rep.maxAbsResid = maxabs;
-+    lastReport_ = rep;
-+    return rep;
-+}
-+
-+double Calibrator::evaluate(double x) const {
-+    double y = base_->eval(x);
-+    if (!chebCoeffs_.empty()) {
-+        auto f = basis_.features(x);
-+        for (size_t k=0;k<chebCoeffs_.size() && k<f.size(); ++k) y += chebCoeffs_[k]*f[k];
-+    }
-+    return y;
-+}
-+
-+void Calibrator::applyZeroTrim(double refAtZero, double pivAtZero) {
-+    double y = evaluate(pivAtZero);
-+    double shift = refAtZero - y;
-+    if (chebCoeffs_.empty()) chebCoeffs_.assign(1, shift);
-+    else chebCoeffs_[0] += shift;
-+}
-+
-+CurveSeries sampleCurve(std::function<double(double)> f, double x0, double x1, int nSamples) {
-+    CurveSeries cs; cs.x.reserve(nSamples); cs.y.reserve(nSamples);
-+    if (nSamples < 2) nSamples = 2;
-+    for (int i=0;i<nSamples;++i) {
-+        double t = (double)i / (nSamples - 1);
-+        double x = x0 + t*(x1 - x0);
-+        cs.x.push_back(x);
-+        cs.y.push_back(f(x));
-+    }
-+    return cs;
-+}
-+
-+} // namespace an2
-+
-*** End Patch
-*** Begin Patch
-*** Add File: src/GostProviders.cpp
-+#include "GostProviders.hpp"
-+#include <fstream>
-+#include <sstream>
-+
-+namespace an2 {
-+
-+static std::shared_ptr<BaseCurveProvider> demoLinear(const std::string& name,
-+                                                     double x0, double y0,
-+                                                     double x1, double y1) {
-+    std::vector<std::pair<double,double>> pts {{x0,y0},{x1,y1}};
-+    auto p = std::make_shared<LookupTableProvider>(pts);
-+    p->setName(name);
-+    return p;
-+}
-+
-+std::shared_ptr<BaseCurveProvider> GostFactory::fromCsv(const std::string& path, const std::string& name) {
-+    std::ifstream f(path);
-+    if (!f) return demoLinear(name+" (DEMO)", 0.0, 0.0, 1.0, 1.0);
-+    std::vector<std::pair<double,double>> pts;
-+    std::string line;
-+    while (std::getline(f, line)) {
-+        if (line.empty()) continue;
-+        std::istringstream iss(line);
-+        std::string sx, sy;
-+        if (!std::getline(iss, sx, ',')) continue;
-+        if (!std::getline(iss, sy, ',')) continue;
-+        try {
-+            double x = std::stod(sx);
-+            double y = std::stod(sy);
-+            pts.emplace_back(x,y);
-+        } catch(...) {}
-+    }
-+    if (pts.size() < 2) return demoLinear(name+" (DEMO)", 0.0, 0.0, 1.0, 1.0);
-+    auto p = std::make_shared<LookupTableProvider>(std::move(pts));
-+    p->setName(name);
-+    return p;
-+}
-+
-+std::shared_ptr<BaseCurveProvider> GostFactory::create(SensorType t, const GostFactoryConfig& cfg) {
-+    switch (t) {
-+        case SensorType::P1_RTD:
-+            if (!cfg.p1_rtd_csv.empty()) return fromCsv(cfg.p1_rtd_csv, "P-1 RTD (table)");
-+            return demoLinear("P-1 RTD (demo)", 80.0, -20.0, 140.0, 130.0);
-+        case SensorType::TC_L:
-+            if (!cfg.tc_l_csv.empty()) return fromCsv(cfg.tc_l_csv, "TC-L (table)");
-+            return demoLinear("TC-L (demo)", 0.0, 0.0, 50.0, 100.0);
-+        case SensorType::P1B_PRESS:
-+            if (!cfg.p1b_csv.empty()) return fromCsv(cfg.p1b_csv, "P-1B (table)");
-+            return demoLinear("P-1B (demo)", 0.0, 0.0, 5.0, 50.0);
-+        case SensorType::PM15B_PRESS:
-+            if (!cfg.pm15b_csv.empty()) return fromCsv(cfg.pm15b_csv, "PM-15B (table)");
-+            return demoLinear("PM-15B (demo)", 0.0, 0.0, 5.0, 100.0);
-+        case SensorType::NO_GOST:
-+        default:
-+            return std::make_shared<NullCurveProvider>();
-+    }
-+}
-+
-+} // namespace an2
-+
-*** End Patch
-*** Begin Patch
-*** Add File: src/ChartHelpers.cpp
-+#include "ChartHelpers.hpp"
-+#include <QtGui/QPen>
-+#include <limits>
-+
-+namespace an2::charts {
-+
-+static QLineSeries* makeSeries(const QString& name, bool pointsVisible=false) {
-+    auto* s = new QLineSeries();
-+    s->setName(name);
-+    s->setPointsVisible(pointsVisible);
-+    return s;
-+}
-+
-+static QScatterSeries* makeScatter(const QString& name) {
-+    auto* s = new QScatterSeries();
-+    s->setName(name);
-+    s->setMarkerShape(QScatterSeries::MarkerShapeCircle);
-+    s->setMarkerSize(9.0);
-+    return s;
-+}
-+
+ FitReport Calibrator::fit() {
+     FitReport rep{}; rep.n = (int)pts_.size();
+     if (pts_.size() < 2) { lastReport_ = rep; return rep; }
+@@
+ }
+ 
+*** a/include/ChartHelpers.hpp
+--- b/include/ChartHelpers.hpp
+@@
+ #pragma once
+ #include <QtCharts/QChartView>
+ #include <QtCharts/QLineSeries>
+ #include <QtCharts/QScatterSeries>
+ #include <QtCharts/QAreaSeries>
+ #include <QtCharts/QValueAxis>
+ #include "CalibrationCore.hpp"
+ 
+ QT_BEGIN_NAMESPACE
+ class QWidget;
+ QT_END_NAMESPACE
+ 
+ namespace an2::charts {
+@@
+-QtCharts::QChartView* createOrUpdateChart(QtCharts::QChartView* view,
 +QChartView* createOrUpdateChart(QChartView* view,
-+                                const BaseCurveProvider* base,
-+                                const Calibrator& calib,
-+                                double tol_percent,
-+                                double x0, double x1,
-+                                const std::vector<FieldPoint>& points)
-+{
+                                 const BaseCurveProvider* base,
+                                 const Calibrator& calib,
+                                 double tol_percent,
+                                 double x0, double x1,
+                                 const std::vector<FieldPoint>& points);
+ 
+ }
+ 
+*** a/src/ChartHelpers.cpp
+--- b/src/ChartHelpers.cpp
+@@
+-#include <QtCharts/QChart>
++#include <QtCharts/QChart>
+ #include <QtGui/QPen>
+ #include <limits>
+ #include <QtCore/QRandomGenerator>
+ 
+ namespace an2::charts {
+ 
+-static QtCharts::QLineSeries* makeSeries(const QString& name, bool pointsVisible=false) {
+-    auto s = new QtCharts::QLineSeries();
++static QLineSeries* makeSeries(const QString& name, bool pointsVisible=false) {
++    auto s = new QLineSeries();
+     s->setName(name);
+     s->setPointsVisible(pointsVisible);
+     return s;
+ }
+ 
+-static QtCharts::QScatterSeries* makeScatter(const QString& name) {
+-    auto s = new QtCharts::QScatterSeries();
++static QScatterSeries* makeScatter(const QString& name) {
++    auto s = new QScatterSeries();
+     s->setName(name);
+-    s->setMarkerShape(QtCharts::QScatterSeries::MarkerShapeCircle);
++    s->setMarkerShape(QScatterSeries::MarkerShapeCircle);
+     s->setMarkerSize(8.0);
+     return s;
+ }
+ 
+-QtCharts::QChartView* createOrUpdateChart(QtCharts::QChartView* view,
++QChartView* createOrUpdateChart(QChartView* view,
+                                 const BaseCurveProvider* base,
+                                 const Calibrator& calib,
+                                 double tol_percent,
+                                 double x0, double x1,
+                                 const std::vector<FieldPoint>& points) {
+-    if (!view) view = new QtCharts::QChartView();
 +    if (!view) view = new QChartView();
-+
-+    auto* chart = new QChart();
-+    chart->legend()->setVisible(true);
-+
-+    // ГОСТ — синяя штриховая
-+    if (base) {
-+        auto* baseS = makeSeries(QString::fromUtf8("ГОСТ: ") + QString::fromStdString(base->name()));
-+        auto cs0 = sampleCurve([&](double x){ return base->eval(x); }, x0, x1, 200);
-+        for (size_t i=0;i<cs0.x.size();++i) baseS->append(cs0.x[i], cs0.y[i]);
-+        QPen pen(QColor("#1f77b4")); pen.setStyle(Qt::DashLine); pen.setWidthF(1.5);
-+        baseS->setPen(pen);
-+        chart->addSeries(baseS);
-+    }
-+
-+    // Тарированная — оранжевая, жирная
-+    auto* fitS = makeSeries(QString::fromUtf8("Тарированная кривая"));
-+    auto cs1 = sampleCurve([&](double x){ return calib.evaluate(x); }, x0, x1, 200);
-+    for (size_t i=0;i<cs1.x.size();++i) fitS->append(cs1.x[i], cs1.y[i]);
-+    { QPen p(QColor("#ff7f0e")); p.setWidthF(2.4); fitS->setPen(p); }
-+    chart->addSeries(fitS);
-+
-+    // Коридор ±tol% — светло-серый полупрозрачный
-+    auto* upper = new QLineSeries(); upper->setName("+");
-+    auto* lower = new QLineSeries(); lower->setName("-");
-+    for (size_t i=0;i<cs1.x.size();++i) {
-+        double y = cs1.y[i];
-+        double d = std::abs(y) * (tol_percent/100.0);
-+        upper->append(cs1.x[i], y + d);
-+        lower->append(cs1.x[i], y - d);
-+    }
-+    auto* area = new QAreaSeries(upper, lower);
-+    area->setName(QString::fromUtf8("Коридор ±%1%").arg(tol_percent));
+ 
+-    auto chart = new QtCharts::QChart();
++    auto chart = new QChart();
+     chart->legend()->setVisible(true);
+ 
+     // Базовая кривая ГОСТ
+     if (base) {
+         auto baseS = makeSeries(QString::fromStdString(std::string("ГОСТ: ")+base->name()));
+         auto cs0 = sampleCurve([&](double x){ return base->eval(x); }, x0, x1, 200);
+         for (size_t i=0;i<cs0.x.size();++i) baseS->append(cs0.x[i], cs0.y[i]);
+-        QPen pen;
+-        pen.setStyle(Qt::DashLine);
++        QPen pen(QColor(0, 102, 204)); // синяя
++        pen.setStyle(Qt::DashLine);
+         baseS->setPen(pen);
+         chart->addSeries(baseS);
+     }
+ 
+     // Подогнанная кривая
+     auto fitS = makeSeries("Тарированная кривая");
+     auto cs1 = sampleCurve([&](double x){ return calib.evaluate(x); }, x0, x1, 200);
+     for (size_t i=0;i<cs1.x.size();++i) fitS->append(cs1.x[i], cs1.y[i]);
+-    QPen penFit; penFit.setWidthF(2.2);
++    QPen penFit(QColor(255, 140, 0)); // оранжевая
++    penFit.setWidthF(2.2);
+     fitS->setPen(penFit);
+     chart->addSeries(fitS);
+ 
+     // Коридор ±tol%
+-    auto upper = new QtCharts::QLineSeries(); upper->setName("+");
+-    auto lower = new QtCharts::QLineSeries(); lower->setName("-");
++    auto upper = new QLineSeries(); upper->setName("+");
++    auto lower = new QLineSeries(); lower->setName("-");
+     for (size_t i=0;i<cs1.x.size();++i) {
+         double y = cs1.y[i];
+         double d = std::abs(y) * (tol_percent/100.0);
+         upper->append(cs1.x[i], y + d);
+         lower->append(cs1.x[i], y - d);
+     }
+-    auto area = new QtCharts::QAreaSeries(upper, lower);
++    auto area = new QAreaSeries(upper, lower);
+     area->setName(QString("Коридор ±%1% ").arg(tol_percent));
+-    area->setOpacity(0.25);
 +    area->setOpacity(0.25);
-+    area->setPen(QPen(Qt::NoPen));
-+    area->setBrush(QColor(200,200,200,128));
-+    chart->addSeries(area);
++    QBrush br(QColor(200,200,200));
++    area->setBrush(br);
+     chart->addSeries(area);
+ 
+     // Точки: референсные и "Ручной ввод"
+     auto refPts = makeScatter("Референсные точки");
+     auto manualPts = makeScatter("Ручной ввод");
++    // Цвета точек
++    QPen refPen(QColor(0, 51, 153)); refPen.setWidthF(2.0);
++    refPts->setPen(refPen);
++    refPts->setBrush(QBrush(QColor(0, 51, 153)));
++    QPen manPen(QColor(204, 102, 0)); manPen.setWidthF(2.0);
++    manualPts->setPen(manPen);
++    manualPts->setBrush(QBrush(QColor(204, 102, 0)));
 +
-+    // Точки
-+    auto* refPts    = makeScatter(QString::fromUtf8("Референсные точки"));
-+    auto* manualPts = makeScatter(QString::fromUtf8("Ручной ввод"));
-+    refPts->setColor(QColor("#0b4f9c"));      // темно-синий
-+    manualPts->setColor(QColor("#b35406"));   // темно-оранжевый
-+
-+    for (const auto& p : points) {
-+        refPts->append(p.piv_live, p.ref);
+     for (auto &p : points) {
+         refPts->append(p.piv_live, p.ref);
+-        if (std::abs(p.manual - p.piv_live) > 1e-9) {
+-            manualPts->append(p.piv_live, p.manual); // если хотите показывать другую ось — адаптируйте
+-        }
 +        manualPts->append(p.piv_live, p.manual);
-+    }
-+    chart->addSeries(refPts);
-+    if (manualPts->count() > 0) chart->addSeries(manualPts);
-+
-+    // Оси
-+    auto* axX = new QValueAxis();
-+    axX->setTitleText(QString::fromUtf8("ПИВ"));
-+    axX->setLabelFormat("%.3f");
-+    axX->setMin(x0); axX->setMax(x1);
-+
-+    double ymin = std::numeric_limits<double>::infinity();
-+    double ymax = -ymin;
-+    for (int i=0;i<fitS->count();++i) {
-+        const auto p = fitS->at(i);
-+        ymin = std::min(ymin, p.y());
-+        ymax = std::max(ymax, p.y());
-+    }
-+    for (int i=0;i<upper->count();++i) ymax = std::max(ymax, upper->at(i).y());
-+    for (int i=0;i<lower->count();++i) ymin = std::min(ymin, lower->at(i).y());
-+    for (int i=0;i<refPts->count();++i) {
-+        const auto p = refPts->at(i);
-+        ymin = std::min(ymin, p.y());
-+        ymax = std::max(ymax, p.y());
-+    }
-+    if (!std::isfinite(ymin) || !std::isfinite(ymax) || ymin == ymax) { ymin = 0.0; ymax = 1.0; }
-+    double margin = (ymax - ymin) * 0.1; if (margin <= 0) margin = 1.0;
-+
-+    auto* axY = new QValueAxis();
-+    axY->setTitleText(QString::fromUtf8("Референс"));
-+    axY->setLabelFormat("%.3f");
-+    axY->setMin(ymin - margin);
-+    axY->setMax(ymax + margin);
-+
-+    chart->addAxis(axX, Qt::AlignBottom);
-+    chart->addAxis(axY, Qt::AlignLeft);
-+    for (auto* s : chart->series()) { s->attachAxis(axX); s->attachAxis(axY); }
-+
-+    view->setChart(chart);
-+    view->setRenderHint(QPainter::Antialiasing);
-+    return view;
-+}
-+
-+} // namespace an2::charts
-+
-*** End Patch
-*** Begin Patch
-*** Add File: src/TestingWindow.cpp
-+#include "TestingWindow.hpp"
-+#include "ChartHelpers.hpp"
-+#include <QtWidgets/QVBoxLayout>
-+#include <QtWidgets/QHBoxLayout>
-+#include <QtWidgets/QLabel>
-+#include <QtWidgets/QHeaderView>
-+#include <QtCore/QRandomGenerator>
-+
-+namespace an2 {
-+
-+TestingWindow::TestingWindow(QWidget* parent) : QMainWindow(parent) {
-+    baseCurve_ = GostFactory::create(type_, cfg_);
-+    calib_.setSensorType(type_);
-+    calib_.setBaseCurve(baseCurve_);
-+
-+    auto* central = new QWidget();
-+    auto* mainL = new QVBoxLayout(central);
-+
-+    // Верхняя панель параметров
-+    auto* top = new QHBoxLayout();
-+    refSpin_ = new QDoubleSpinBox(); refSpin_->setDecimals(3); refSpin_->setRange(-100000, 100000);
-+    deltaPctSpin_ = new QDoubleSpinBox(); deltaPctSpin_->setDecimals(2); deltaPctSpin_->setRange(0.0, 100.0); deltaPctSpin_->setValue(5.0);
-+    validSecSpin_ = new QDoubleSpinBox(); validSecSpin_->setDecimals(1); validSecSpin_->setRange(0.1, 120.0); validSecSpin_->setValue(5.0);
-+    timeoutSecSpin_ = new QDoubleSpinBox(); timeoutSecSpin_->setDecimals(1); timeoutSecSpin_->setRange(0.5, 300.0); timeoutSecSpin_->setValue(10.0);
-+    tolSpin_ = new QDoubleSpinBox(); tolSpin_->setDecimals(2); tolSpin_->setRange(0.0, 100.0); tolSpin_->setValue(5.0);
-+
-+    btnConfirmRef_ = new QPushButton("Подтвердить референс");
-+    btnAddPoint_   = new QPushButton("Добавить точку");
-+    btnDelete_     = new QPushButton("Удалить строку");
+     }
+     chart->addSeries(refPts);
+-    if (manualPts->count()>0) chart->addSeries(manualPts);
++    if (manualPts->count()>0) chart->addSeries(manualPts);
+ 
+     // Оси
+-    auto axX = new QtCharts::QValueAxis(); axX->setTitleText("ПИВ");
++    auto axX = new QValueAxis(); axX->setTitleText("ПИВ");
+     axX->setLabelFormat("%.3f");
+     axX->setMin(x0); axX->setMax(x1);
+ 
+     // По Y подберём по данным
+     double ymin = std::numeric_limits<double>::infinity();
+@@
+-    auto axY = new QtCharts::QValueAxis(); axY->setTitleText("Референс");
++    auto axY = new QValueAxis(); axY->setTitleText("Референс");
+     axY->setLabelFormat("%.3f");
+     if (!std::isfinite(ymin) || !std::isfinite(ymax) || ymin==ymax) { ymin = 0.0; ymax = 1.0; }
+     double m = (ymax - ymin)*0.1; if (m<=0) m = 1.0;
+     axY->setMin(ymin - m); axY->setMax(ymax + m);
+ 
+     chart->addAxis(axX, Qt::AlignBottom);
+     chart->addAxis(axY, Qt::AlignLeft);
+ 
+     for (auto s : chart->series()) {
+         s->attachAxis(axX);
+         s->attachAxis(axY);
+     }
+ 
+     view->setChart(chart);
+     view->setRenderHint(QPainter::Antialiasing);
+     return view;
+ }
+ 
+ } // namespace an2::charts
+ 
+*** a/include/TestingWindow.hpp
+--- b/include/TestingWindow.hpp
+@@
+ #include <QtWidgets/QMainWindow>
+ #include <QtWidgets/QTableWidget>
+ #include <QtWidgets/QPushButton>
+ #include <QtWidgets/QLineEdit>
+ #include <QtWidgets/QDoubleSpinBox>
+ #include <QtCore/QTimer>
+ #include <QtCore/QElapsedTimer>
+ #include <QtCharts/QChartView>
+ #include "CalibrationCore.hpp"
+ #include "GostProviders.hpp"
+ 
+ namespace an2 {
+ 
+ class TestingWindow : public QMainWindow {
+     Q_OBJECT
+ public:
+     explicit TestingWindow(QWidget* parent=nullptr);
+ 
+ private slots:
+     void onConfirmRef();
+-    void onStartStop();
+     void onAddPoint();
+-    void onAcceptValid();
++    void onDeleteRow();
++    void onClearTable();
+     void onFit();
+     void onZeroTrim();
+     void onTick();
+ 
+ private:
+     void rebuildChart();
+     void appendTableRow(const FieldPoint& fp);
++    void finalizeCurrentRow(bool valid, double mean);
+ 
+     // Виджеты
+     QTableWidget* table_{};
+-    QtCharts::QChartView* chartView_{};
++    QChartView* chartView_{};
+     QDoubleSpinBox* refSpin_{};         // референс
+-    QDoubleSpinBox* deltaSpin_{};       // дельта стабилизации по ПИВ (в единицах ПИВ)
++    QDoubleSpinBox* deltaPercentSpin_{}; // Δ ПИВ, %
+     QDoubleSpinBox* tolSpin_{};         // допуск ±% для коридора
++    QDoubleSpinBox* winSpin_{};         // окно валидности, c
++    QDoubleSpinBox* timeoutSpin_{};     // общее ожидание, c
+     QPushButton* btnConfirmRef_{};
+-    QPushButton* btnStartStop_{};
+     QPushButton* btnAddPoint_{};
+-    QPushButton* btnAcceptValid_{};
++    QPushButton* btnDeleteRow_{};
++    QPushButton* btnClear_{};
+     QPushButton* btnFit_{};
+     QPushButton* btnZeroTrim_{};
+ 
+     // Модель
+     SensorType type_ = SensorType::NO_GOST;
+     GostFactoryConfig cfg_{}; // в демо пустой — будут заглушки
+     std::shared_ptr<BaseCurveProvider> baseCurve_{};
+     Calibrator calib_{};
+ 
+     // Стабилизация
+     PivStabilizer stab_{{0.2, 10.0}}; // параметры будут переустанавливаться
+     QTimer timer_{};                  // таймер тиков (симуляция прихода ПИВ)
+     QElapsedTimer elapsed_{};         // отсчёт времени
+-    bool running_ = false;
+ 
+     // Текущее состояние симуляции/валидации
+     double currentPiv_ = 0.0;         // "бегущий" ПИВ (симуляция)
+     double targetPiv_ = 0.0;          // целевое значение около референса
+     double pivNoise_ = 0.05;          // шум ПИВ
++    bool validityAchieved_ = false;
++    bool timeoutFired_ = false;
+ };
+ 
+ } // namespace an2
+ 
+*** a/src/TestingWindow.cpp
+--- b/src/TestingWindow.cpp
+@@
+ #include <QtWidgets/QVBoxLayout>
+ #include <QtWidgets/QHBoxLayout>
+ #include <QtWidgets/QLabel>
+ #include <QtWidgets/QHeaderView>
+ #include <QtCore/QRandomGenerator>
+ #include "ChartHelpers.hpp"
+ 
+ namespace an2 {
+ 
+ TestingWindow::TestingWindow(QWidget* parent) : QMainWindow(parent) {
+     // Базовая НСХ по умолчанию
+     baseCurve_ = GostFactory::create(type_, cfg_);
+     calib_.setSensorType(type_);
+     calib_.setBaseCurve(baseCurve_);
+ 
+     auto* central = new QWidget();
+     auto* mainL = new QVBoxLayout(central);
+ 
+     // Верхняя панель
+     auto* top = new QHBoxLayout();
+     refSpin_ = new QDoubleSpinBox(); refSpin_->setDecimals(3); refSpin_->setRange(-10000, 10000);
+-    deltaSpin_ = new QDoubleSpinBox(); deltaSpin_->setDecimals(3); deltaSpin_->setRange(0.0, 1000.0); deltaSpin_->setValue(0.2);
++    deltaPercentSpin_ = new QDoubleSpinBox(); deltaPercentSpin_->setDecimals(2); deltaPercentSpin_->setRange(0.0, 100.0); deltaPercentSpin_->setValue(5.0);
+     tolSpin_ = new QDoubleSpinBox(); tolSpin_->setDecimals(2); tolSpin_->setRange(0.0, 100.0); tolSpin_->setValue(5.0);
++    winSpin_ = new QDoubleSpinBox(); winSpin_->setDecimals(1); winSpin_->setRange(0.1, 3600.0); winSpin_->setValue(5.0);
++    timeoutSpin_ = new QDoubleSpinBox(); timeoutSpin_->setDecimals(1); timeoutSpin_->setRange(0.1, 3600.0); timeoutSpin_->setValue(10.0);
+ 
+     btnConfirmRef_ = new QPushButton("Подтвердить референс");
+-    btnStartStop_  = new QPushButton("Старт стабилизации");
+     btnAddPoint_   = new QPushButton("Добавить точку");
+-    btnAcceptValid_= new QPushButton("Принять валидное");
++    btnDeleteRow_  = new QPushButton("Удалить строку");
 +    btnClear_      = new QPushButton("Очистить таблицу");
-+    btnFit_        = new QPushButton("Подгонка");
-+    btnZeroTrim_   = new QPushButton("Zero-Trim");
-+
-+    top->addWidget(new QLabel("Референс:"));    top->addWidget(refSpin_);
-+    top->addWidget(new QLabel("Δ ПИВ, %:"));    top->addWidget(deltaPctSpin_);
-+    top->addWidget(new QLabel("Валидн., c:"));  top->addWidget(validSecSpin_);
-+    top->addWidget(new QLabel("Таймаут, c:"));  top->addWidget(timeoutSecSpin_);
-+    top->addWidget(new QLabel("Допуск, %:"));   top->addWidget(tolSpin_);
-+    top->addWidget(btnConfirmRef_);
-+    top->addWidget(btnAddPoint_);
-+    top->addWidget(btnDelete_);
+     btnFit_        = new QPushButton("Подгонка модели");
+     btnZeroTrim_   = new QPushButton("Zero-Trim");
+ 
+     top->addWidget(new QLabel("Референс:")); top->addWidget(refSpin_);
+-    top->addWidget(new QLabel("Δ ПИВ:"));    top->addWidget(deltaSpin_);
++    top->addWidget(new QLabel("Δ ПИВ, %:")); top->addWidget(deltaPercentSpin_);
+     top->addWidget(new QLabel("Допуск, %:"));top->addWidget(tolSpin_);
++    top->addWidget(new QLabel("Окно валидн., c:")); top->addWidget(winSpin_);
++    top->addWidget(new QLabel("Ожидание, c:"));     top->addWidget(timeoutSpin_);
+     top->addWidget(btnConfirmRef_);
+-    top->addWidget(btnStartStop_);
+     top->addWidget(btnAddPoint_);
+-    top->addWidget(btnAcceptValid_);
++    top->addWidget(btnDeleteRow_);
 +    top->addWidget(btnClear_);
-+    top->addWidget(btnFit_);
-+    top->addWidget(btnZeroTrim_);
-+    mainL->addLayout(top);
-+
-+    // Таблица
-+    table_ = new QTableWidget(0, 5);
-+    QStringList headers{"#","Референс","ПИВ (live)","Валидность","Ручной ввод"};
-+    table_->setHorizontalHeaderLabels(headers);
-+    table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-+    mainL->addWidget(table_, 1);
-+
-+    // График
+     top->addWidget(btnFit_);
+     top->addWidget(btnZeroTrim_);
+ 
+     mainL->addLayout(top);
+ 
+     // Таблица
+     table_ = new QTableWidget(0, 5);
+     QStringList headers{"#","Референс","ПИВ (live)","Валидность","Ручной ввод"};
+     table_->setHorizontalHeaderLabels(headers);
+     table_->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+     mainL->addWidget(table_, 1);
+ 
+     // График
+-    chartView_ = new QtCharts::QChartView();
 +    chartView_ = new QChartView();
-+    mainL->addWidget(chartView_, 2);
+     mainL->addWidget(chartView_, 2);
+ 
+     setCentralWidget(central);
+     setWindowTitle("АН-2 — Тест интерфейса тарировки");
+     resize(960, 720);
+ 
+     // Сигналы
+     connect(btnConfirmRef_, &QPushButton::clicked, this, &TestingWindow::onConfirmRef);
+-    connect(btnStartStop_,  &QPushButton::clicked, this, &TestingWindow::onStartStop);
+     connect(btnAddPoint_,   &QPushButton::clicked, this, &TestingWindow::onAddPoint);
+-    connect(btnAcceptValid_,&QPushButton::clicked, this, &TestingWindow::onAcceptValid);
++    connect(btnDeleteRow_,  &QPushButton::clicked, this, &TestingWindow::onDeleteRow);
++    connect(btnClear_,      &QPushButton::clicked, this, &TestingWindow::onClearTable);
+     connect(btnFit_,        &QPushButton::clicked, this, &TestingWindow::onFit);
+     connect(btnZeroTrim_,   &QPushButton::clicked, this, &TestingWindow::onZeroTrim);
+ 
+     // Таймер ПИВ-симуляции
+     connect(&timer_, &QTimer::timeout, this, &TestingWindow::onTick);
+     timer_.setInterval(50); // 20 Гц
+ }
+ 
+ void TestingWindow::onConfirmRef() {
+-    // Подтверждение референса → запускаем таймер стабилизации
+-    stab_ = PivStabilizer({deltaSpin_->value(), 10.0});
++    // Подтверждение референса → запускаем автостабилизацию
++    validityAchieved_ = false;
++    timeoutFired_ = false;
++    // абсолютная дельта из процента от целевого значения
++    const double deltaAbs = std::abs(refSpin_->value()) * (deltaPercentSpin_->value()/100.0);
++    stab_ = PivStabilizer({deltaAbs, winSpin_->value()});
+     stab_.reset();
+     elapsed_.restart();
+ 
+     // Сдвигаем целевой ПИВ (симуляция)
+     targetPiv_ = refSpin_->value();
+     currentPiv_ = targetPiv_ + (QRandomGenerator::global()->bounded(1.0) - 0.5);
 +
-+    setCentralWidget(central);
-+    setWindowTitle("АН-2 — Тест интерфейса тарировки (PR_02)");
-+    resize(960, 720);
-+
-+    // Сигналы
-+    connect(btnConfirmRef_, &QPushButton::clicked, this, &TestingWindow::onConfirmRef);
-+    connect(btnAddPoint_,   &QPushButton::clicked, this, &TestingWindow::onAddPoint);
-+    connect(btnDelete_,     &QPushButton::clicked, this, &TestingWindow::onDeletePoint);
-+    connect(btnClear_,      &QPushButton::clicked, this, &TestingWindow::onClearAll);
-+    connect(btnFit_,        &QPushButton::clicked, this, &TestingWindow::onFit);
-+    connect(btnZeroTrim_,   &QPushButton::clicked, this, &TestingWindow::onZeroTrim);
-+    connect(&timer_, &QTimer::timeout, this, &TestingWindow::onTick);
-+    timer_.setInterval(50); // 20 Гц
-+}
-+
-+void TestingWindow::onConfirmRef() {
-+    // Настраиваем стабилизатор из UI
-+    const double ref = refSpin_->value();
-+    targetPiv_ = ref;
-+    currentPiv_ = targetPiv_;
-+    const double deltaAbs = std::abs(targetPiv_) * (deltaPctSpin_->value()/100.0);
-+    stab_.setParams({deltaAbs, validSecSpin_->value()});
-+    stab_.reset();
-+    elapsed_.restart();
-+    startMs_ = 0;
-+    awaitingValidation_ = true;
-+    running_ = true;
-+    timer_.start();
-+
-+    // добавим/обновим последнюю строку как текущий шаг измерения
-+    FieldPoint fp;
-+    fp.index    = table_->rowCount() + 1;
-+    fp.ref      = ref;
-+    fp.piv_live = currentPiv_;
-+    fp.valid    = false;
-+    fp.manual   = currentPiv_;
-+    calib_.addPoint(fp.ref, fp.piv_live, fp.valid, fp.manual);
-+    appendTableRow(fp);
-+}
-+
-+void TestingWindow::onAddPoint() {
-+    FieldPoint fp; fp.index = table_->rowCount()+1;
-+    fp.ref = refSpin_->value();
-+    fp.piv_live = currentPiv_;
-+    fp.valid = false;
-+    fp.manual = currentPiv_;
-+    calib_.addPoint(fp.ref, fp.piv_live, fp.valid, fp.manual);
-+    appendTableRow(fp);
-+}
-+
-+void TestingWindow::onDeletePoint() {
-+    auto sel = table_->selectionModel();
-+    if (!sel) return;
-+    auto rows = sel->selectedRows();
-+    if (rows.isEmpty()) return;
-+    const int r = rows.first().row();
-+    // удалить из модели
-+    if (r >= 0 && r < (int)calib_.points().size()) {
-+        calib_.points().erase(calib_.points().begin()+r);
-+        table_->removeRow(r);
-+        // переиндексация
-+        for (int i=r;i<table_->rowCount();++i) {
-+            table_->item(i,0)->setText(QString::number(i+1));
-+        }
-+        // перерисовать график
-+        rebuildChart();
++    // добавляем или обновляем текущую строку
++    if (table_->rowCount()==0 || !table_->item(table_->rowCount()-1,1)) {
++        FieldPoint fp; fp.index = table_->rowCount()+1;
++        fp.ref = refSpin_->value();
++        fp.piv_live = currentPiv_;
++        fp.valid = false;
++        fp.manual = currentPiv_;
++        calib_.addPoint(fp.ref, fp.piv_live, fp.valid, fp.manual);
++        appendTableRow(fp);
++    } else {
++        // обновляем последнюю строку под новый референс
++        int r = table_->rowCount()-1;
++        table_->item(r,1)->setText(QString::number(refSpin_->value(),'f',3));
 +    }
++
++    // запускаем тики
++    timer_.start();
+ }
+ 
+-void TestingWindow::onStartStop() {
+-    running_ = !running_;
+-    if (running_) { timer_.start(); btnStartStop_->setText("Стоп стабилизации"); }
+-    else { timer_.stop(); btnStartStop_->setText("Старт стабилизации"); }
+-}
+-
+ void TestingWindow::onAddPoint() {
+     FieldPoint fp; fp.index = table_->rowCount()+1;
+     fp.ref = refSpin_->value();
+     fp.piv_live = currentPiv_;
+     fp.valid = false;
+     fp.manual = currentPiv_;
+     calib_.addPoint(fp.ref, fp.piv_live, fp.valid, fp.manual);
+     appendTableRow(fp);
+ }
+ 
+-void TestingWindow::onAcceptValid() {
+-    // Принять валидное — теперь делается автоматически
+-    int r = table_->rowCount()-1;
+-    if (r>=0) {
+-        table_->item(r,3)->setText("OK");
+-        table_->item(r,4)->setText(table_->item(r,2)->text());
+-    }
+-    rebuildChart();
+-}
++void TestingWindow::onDeleteRow() {
++    int r = table_->currentRow();
++    if (r<0 || r>=table_->rowCount()) return;
++    calib_.removePointByIndex(static_cast<std::size_t>(r));
++    table_->removeRow(r);
++    rebuildChart();
 +}
 +
-+void TestingWindow::onClearAll() {
++void TestingWindow::onClearTable() {
 +    calib_.clearPoints();
 +    table_->setRowCount(0);
 +    rebuildChart();
 +}
-+
-+void TestingWindow::onFit() {
-+    calib_.fit();
-+    rebuildChart();
-+}
-+
-+void TestingWindow::onZeroTrim() {
-+    calib_.applyZeroTrim(refSpin_->value(), currentPiv_);
-+    rebuildChart();
-+}
-+
-+void TestingWindow::onTick() {
-+    if (!running_) return;
-+    const std::int64_t now = elapsed_.elapsed();
-+    if (startMs_ == 0) startMs_ = now;
-+
-+    // приход ПИВ (симуляция)
-+    double noise = (QRandomGenerator::global()->bounded(1.0) - 0.5) * 2.0 * pivNoise_;
-+    currentPiv_ = targetPiv_ + noise;
-+
-+    auto st = stab_.pushSample(currentPiv_, now);
-+    const double timeoutSec = timeoutSecSpin_->value();
-+    const bool timeout = (now - startMs_) >= (std::int64_t)(timeoutSec*1000.0);
-+
+ 
+ void TestingWindow::onFit() {
+     auto rep = calib_.fit();
+     rebuildChart();
+ }
+@@
+ void TestingWindow::onTick() {
+-    if (!running_) return;
+     // Симуляция прихода ПИВ вокруг targetPiv_
+     double noise = (QRandomGenerator::global()->bounded(1.0) - 0.5) * 2.0 * pivNoise_;
+     currentPiv_ = targetPiv_ + noise;
+ 
+     auto st = stab_.pushSample(currentPiv_, elapsed_.elapsed());
+ 
+     // Обновить live-ячейку таблицы в последней строке (если есть)
+     int r = table_->rowCount()-1;
+     if (r>=0) {
+         if (!table_->item(r,2)) table_->setItem(r,2,new QTableWidgetItem());
+         table_->item(r,2)->setText(QString::number(currentPiv_, 'f', 3));
+         // Положим среднее как UserData для дальнейшего чтения
+         table_->item(r,2)->setData(Qt::UserRole+1, st.mean);
+         if (!table_->item(r,3)) table_->setItem(r,3,new QTableWidgetItem());
+-        table_->item(r,3)->setText(st.stable? "OK": QString("%1/%2 c").arg(st.duration,0,'f',1).arg(10));
++        table_->item(r,3)->setText(st.stable? "OK": QString("%1/%2 c").arg(st.duration,0,'f',1).arg(winSpin_->value()));
+     }
+ 
++    const double timeout = timeoutSpin_->value();
++    // Условия завершения
++    if (!validityAchieved_ && st.stable && st.duration >= winSpin_->value()) {
++        validityAchieved_ = true;
++        finalizeCurrentRow(true, st.mean);
++        timer_.stop();
++        return;
++    }
++    if (!timeoutFired_ && (elapsed_.elapsed()/1000.0) >= timeout) {
++        timeoutFired_ = true;
++        finalizeCurrentRow(false, st.mean);
++        timer_.stop();
++        return;
++    }
+ }
+ 
+ void TestingWindow::rebuildChart() {
+     const auto xr = baseCurve_->xRange();
+     chartView_ = charts::createOrUpdateChart(chartView_, baseCurve_.get(), calib_, tolSpin_->value(), xr.first, xr.second, calib_.points());
+ }
+ 
+ void TestingWindow::appendTableRow(const FieldPoint& fp) {
+     int r = table_->rowCount();
+     table_->insertRow(r);
+     table_->setItem(r,0,new QTableWidgetItem(QString::number(fp.index)));
+     table_->setItem(r,1,new QTableWidgetItem(QString::number(fp.ref, 'f', 3)));
+     table_->setItem(r,2,new QTableWidgetItem(QString::number(fp.piv_live, 'f', 3)));
+     table_->setItem(r,3,new QTableWidgetItem(fp.valid?"OK":"…"));
+     table_->setItem(r,4,new QTableWidgetItem(QString::number(fp.manual, 'f', 3)));
+ }
+ 
++void TestingWindow::finalizeCurrentRow(bool valid, double mean) {
 +    int r = table_->rowCount()-1;
-+    if (r>=0) {
-+        if (!table_->item(r,2)) table_->setItem(r,2,new QTableWidgetItem());
-+        table_->item(r,2)->setText(QString::number(currentPiv_, 'f', 3));
-+        table_->item(r,2)->setData(Qt::UserRole+1, st.mean);
-+
-+        if (awaitingValidation_) {
-+            if (st.stable) {
-+                awaitingValidation_ = false;
-+                running_ = false;
-+                timer_.stop();
-+                updateValidationUI(r, true, false, st.mean);
-+            } else if (timeout) {
-+                awaitingValidation_ = false;
-+                running_ = false;
-+                timer_.stop();
-+                updateValidationUI(r, false, true, st.mean);
-+            } else {
-+                if (!table_->item(r,3)) table_->setItem(r,3,new QTableWidgetItem());
-+                table_->item(r,3)->setText(QString("%1/%2 c").arg(st.duration,0,'f',1).arg(stab_.params().windowSec,0,'f',1));
-+            }
-+        }
-+    }
-+}
-+
-+void TestingWindow::updateValidationUI(int row, bool ok, bool timeout, double mean) {
-+    if (!table_->item(row,3)) table_->setItem(row,3,new QTableWidgetItem());
-+    if (!table_->item(row,4)) table_->setItem(row,4,new QTableWidgetItem());
-+
-+    auto* v = table_->item(row,3);
-+    auto* m = table_->item(row,4);
-+    if (ok) {
-+        v->setText("OK");
-+        m->setText(QString::number(mean, 'f', 3));
-+        m->setForeground(QBrush(Qt::darkGreen));
-+        // отметить точку как валидную в модели
-+        if (row >=0 && row < (int)calib_.points().size()) {
-+            calib_.points()[row].valid = true;
-+            calib_.points()[row].manual = mean;
-+        }
-+    } else {
-+        v->setText("timeout");
-+        m->setText(QString::number(mean, 'f', 3));
-+        m->setForeground(QBrush(Qt::red));
-+        if (row >=0 && row < (int)calib_.points().size()) {
-+            calib_.points()[row].valid = false;
-+            calib_.points()[row].manual = mean;
-+        }
-+    }
++    if (r<0) return;
++    // В модель
++    calib_.updatePoint(static_cast<std::size_t>(r),
++                       table_->item(r,1)->text().toDouble(),
++                       table_->item(r,2)->text().toDouble(),
++                       valid,
++                       mean);
++    // В таблицу
++    auto* cellValid = table_->item(r,3);
++    if (!cellValid) { cellValid = new QTableWidgetItem(); table_->setItem(r,3,cellValid); }
++    auto* cellManual = table_->item(r,4);
++    if (!cellManual) { cellManual = new QTableWidgetItem(); table_->setItem(r,4,cellManual); }
++    cellManual->setText(QString::number(mean,'f',3));
++    QBrush brush(valid ? QColor(0,160,0) : QColor(200,0,0));
++    cellManual->setForeground(brush);
++    cellValid->setText(valid ? "OK" : QString("timeout %1 c").arg(timeoutSpin_->value(),0,'f',1));
 +    rebuildChart();
 +}
 +
-+void TestingWindow::rebuildChart() {
-+    const auto xr = baseCurve_->xRange();
-+    chartView_ = charts::createOrUpdateChart(chartView_, baseCurve_.get(), calib_, tolSpin_->value(),
-+                                             xr.first, xr.second, calib_.points());
-+}
-+
-+void TestingWindow::appendTableRow(const FieldPoint& fp) {
-+    int r = table_->rowCount();
-+    table_->insertRow(r);
-+    table_->setItem(r,0,new QTableWidgetItem(QString::number(fp.index)));
-+    table_->setItem(r,1,new QTableWidgetItem(QString::number(fp.ref, 'f', 3)));
-+    table_->setItem(r,2,new QTableWidgetItem(QString::number(fp.piv_live, 'f', 3)));
-+    table_->setItem(r,3,new QTableWidgetItem(fp.valid?"OK":"…"));
-+    auto* manual = new QTableWidgetItem(QString::number(fp.manual, 'f', 3));
-+    manual->setForeground(QBrush(Qt::darkYellow));
-+    table_->setItem(r,4, manual);
-+}
-+
-+} // namespace an2
-+
-*** End Patch
-*** Begin Patch
-*** Add File: src/main.cpp
-+#include <QtWidgets/QApplication>
-+#include "TestingWindow.hpp"
-+
-+int main(int argc, char** argv) {
-+    QApplication app(argc, argv);
-+    an2::TestingWindow w; w.show();
-+    return app.exec();
-+}
-+
-*** End Patch
+ } // namespace an2
